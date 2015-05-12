@@ -3,7 +3,7 @@
 // https://github.com/cjohansen/Sinon.JS/issues/319
   if (navigator.userAgent.indexOf('PhantomJS') !== -1 ||
       navigator.userAgent.indexOf('Iceweasel') !== -1) {
-    window.ProgressEvent = function (type, params) {
+    window.ProgressEvent = function(type, params) {
       params = params || {};
 
       this.lengthComputable = params.lengthComputable || false;
@@ -18,7 +18,8 @@ var MYJSON = JSON;
 describe('Unit test of json rpc client', function() {
 
   // Setup fake xhr server
-  var server, savedWebSocket;
+  var server;
+  var savedWebSocket;
   beforeEach(function() {
     server = sinon.fakeServer.create();
     savedWebSocket = window.WebSocket; // Some test override the ws
@@ -348,6 +349,24 @@ describe('Unit test of json rpc client', function() {
     client.notify('foo', []);
   });
 
+  it('shold should fall back to AJAX if it can not open the WebSocket.', function() {
+
+    // Mock a websocket-like object and patch it in!
+    // cleanup is done in beforeEach and afterEach
+    window.WebSocket = function() {
+      throw new Exception('Give up!');
+    };
+
+    var client = new $.JsonRpcClient({
+      socketUrl: 'ws://echo.websocket.org/',
+      ajaxUrl: 'foobar'
+    });
+
+    // Send a request with client. This should return null if websockets are used or a
+    // jquery deffered object when using ajax
+    expect(client.notify('foo', [])).to.not.be.null;
+  });
+
   // Issue #14
   it(
     'should send along messages that fail JSON parsing to fallback message handler',
@@ -526,7 +545,7 @@ describe('Unit test of json rpc client', function() {
 
     var client = new $.JsonRpcClient({
       ajaxUrl: '/echoheaders',
-      headers: {'Roadkill-Quality':'high'}
+      headers: {'Roadkill-Quality': 'high'}
     });
     var failure = sinon.stub().throws('Failure should not be called!');
 
@@ -584,6 +603,155 @@ describe('Unit test of json rpc client', function() {
       expect(client.JSON.parse).to.be.equal($.parseJSON);
 
     });
+
+  });
+
+  it('should fail all pending calls on websocket error', function() {
+    // Mock a websocket-like object and patch it in!
+    window.WebSocket = function() {
+      this.onopen    = null;
+      this.onmessage = null;
+      this.onclose   = null;
+      this.onerror   = null;
+      this.readyState = 0;
+
+      this._open = function() {
+        this.readyState = 1;
+        this.onopen && this.onopen();
+      };
+      this.send = function() {};
+    };
+
+    var dontCall = sinon.stub().throws();
+    var onerror = sinon.stub();
+    var client = new $.JsonRpcClient({
+      socketUrl: 'ws://localhost/',
+      ajaxUrl: 'foobar',
+      onmessage: dontCall,
+      onerror: onerror,
+      onclose: dontCall
+    });
+
+    var fail = sinon.stub();
+
+    client.call('foo', [], dontCall, fail);
+    client.call('foo', [], dontCall, fail);
+    client.call('foo', [], dontCall, fail);
+
+    // Trigger Error
+    var ev = sinon.spy();
+    client._wsSocket.onerror(ev);
+
+    // Check that all have failed.
+    expect(fail).to.have.been.calledThrice;
+    expect(onerror).to.have.been.calledOnce;
+  });
+
+  it('should fail all pending calls on websocket close', function() {
+    // Mock a websocket-like object and patch it in!
+    window.WebSocket = function() {
+      this.onopen    = null;
+      this.onmessage = null;
+      this.onclose   = null;
+      this.onerror   = null;
+      this.readyState = 0;
+
+      this._open = function() {
+        this.readyState = 1;
+        this.onopen && this.onopen();
+      };
+      this.send = function() {};
+    };
+
+    var dontCall = sinon.stub().throws();
+    var onclose = sinon.stub();
+    var client = new $.JsonRpcClient({
+      socketUrl: 'ws://localhost/',
+      ajaxUrl: 'foobar',
+      onmessage: dontCall,
+      onerror: dontCall,
+      onclose: onclose
+    });
+
+    var fail = sinon.stub();
+
+    client.call('foo', [], dontCall, fail);
+    client.call('foo', [], dontCall, fail);
+    client.call('foo', [], dontCall, fail);
+
+    // Trigger Error
+    client._wsSocket.onclose();
+
+    // Check that all have failed.
+    expect(fail).to.have.been.calledThrice;
+    expect(onclose).to.have.been.calledOnce;
+  });
+
+  it('should timeout a websocket call that does not get a response', function(done) {
+
+    window.WebSocket = function() {
+      this.onopen     = null;
+      this.onmessage  = null;
+      this.onclose    = null;
+      this.onerror    = null;
+      this.send = function() {};
+    };
+
+    var client = new $.JsonRpcClient({
+      socketUrl: 'ws://localhost/',
+      timeout: 10
+    });
+
+    var dontCall = sinon.stub().throws();
+    var fail = sinon.stub();
+
+    client.call('foo', [], dontCall, fail);
+    expect(fail).to.not.have.been.called;
+
+    setTimeout(function() {
+      expect(fail).to.have.been.calledWith('Call timed out.');
+      done();
+    }, 15);
+  });
+
+  it('should clear any timeout when we get a response', function(done) {
+
+    window.WebSocket = function() {
+      this.onopen     = null;
+      this.onmessage  = null;
+      this.onclose    = null;
+      this.onerror    = null;
+      this.send = function(data) {
+        var that = this;
+
+        setTimeout(function() {
+          // Fake a json response
+          that.onmessage({
+            data: MYJSON.stringify({
+              jsonrpc: '2.0',
+              id:      MYJSON.parse(data).id,
+              result:  'foobar'
+            })
+          });
+        }, 0);
+      };
+    };
+
+    var client = new $.JsonRpcClient({
+      socketUrl: 'ws://localhost/',
+      timeout: 70
+    });
+
+    var dontCall = sinon.stub().throws();
+    var success = sinon.spy();
+
+    client.call('foo', [], success, dontCall);
+    //expect(success).to.not.have.been.called;
+
+    setTimeout(function() {
+      expect(success).to.have.been.called;
+      done();
+    }, 100);
 
   });
 

@@ -35,6 +35,9 @@
    *                           Or, it could return null if no socket is available.
    *                           The returned instance must have readyState <= 1, and if less than 1,
    *                           react to onopen binding.
+   *                timeout    (optional) A number of ms to wait before timing out and failing a
+   *                           call. If specified a setTimeout will be used to keep track of calls
+   *                           made through a websocket.
    */
   var JsonRpcClient = function(options) {
     var self = this;
@@ -48,13 +51,22 @@
       onclose     : noop, ///< Optional onclose-handler for WebSocket.
       onerror     : noop, ///< Optional onerror-handler for WebSocket.
       /// Custom socket supplier for using an already existing socket
-      getSocket   : function (onmessageCb) { return self._getSocket(onmessageCb); }
+      getSocket   : function(onmessageCb) { return self._getSocket(onmessageCb); }
     }, options);
 
     // Declare an instance version of the onmessage callback to wrap 'this'.
     this.wsOnMessage = function(event) { self._wsOnMessage(event); };
 
-    // queue for ws request sent *before* ws is open.
+    /// Holding the WebSocket on default getsocket.
+    this._wsSocket = null;
+
+    /// Object <id>: { success_cb: cb, error_cb: cb }
+    this._wsCallbacks = {};
+
+    /// The next JSON-RPC request id.
+    this._currentId = 1;
+
+    //queue for ws request sent *before* ws is open.
     this._wsRequestQueue = [];
 
     if (!window.JSON && $ && $.toJSON) {
@@ -67,15 +79,6 @@
     }
 
   };
-
-  /// Holding the WebSocket on default getsocket.
-  JsonRpcClient.prototype._wsSocket = null;
-
-  /// Object <id>: { successCb: cb, errorCb: cb }
-  JsonRpcClient.prototype._wsCallbacks = {};
-
-  /// The next JSON-RPC request id.
-  JsonRpcClient.prototype._currentId = 1;
 
   /**
    * @fn call
@@ -123,6 +126,7 @@
       cache      : false,
       headers    : this.options.headers,
       xhrFields  : this.options.xhrFields,
+      timeout    : this.options.timeout,
 
       success    : function(data) {
         if ('error' in data) {
@@ -234,17 +238,24 @@
     if (this.options.socketUrl === null || !('WebSocket' in window)) { return null; }
 
     if (this._wsSocket === null || this._wsSocket.readyState > 1) {
-      // No socket, or dying socket, let's get a new one.
-      this._wsSocket = new WebSocket(this.options.socketUrl);
+
+      try {
+        // No socket, or dying socket, let's get a new one.
+        this._wsSocket = new WebSocket(this.options.socketUrl);
+      } catch (e) {
+        // This can happen if the server is down, or malconfigured.
+        return null;
+      }
 
       // Set up onmessage handler.
       this._wsSocket.onmessage = onmessageCb;
 
+      var that = this;
       // Set up onclose handler.
-      this._wsSocket.onclose = this.options.onclose;
+      this._wsSocket.onclose = function(ev) { that._wsOnClose(ev); };
 
       // Set up onerror handler.
-      this._wsSocket.onerror = this.options.onerror;
+      this._wsSocket.onerror = function(ev) { that._wsOnError(ev); };
     }
 
     return this._wsSocket;
@@ -258,6 +269,11 @@
    */
   JsonRpcClient.prototype._wsCall = function(socket, request, successCb, errorCb) {
     var requestJson = this.JSON.stringify(request);
+
+    // Setup callbacks.  If there is an id, this is a call and not a notify.
+    if ('id' in request && typeof successCb !== 'undefined') {
+      this._wsCallbacks[request.id] = {successCb: successCb, errorCb: errorCb};
+    }
 
     if (socket.readyState < 1) {
 
@@ -274,20 +290,29 @@
           self.options.onopen(event);
 
           // Send queued requests.
+          var timeout = self.options.timeout;
+          var request;
           for (var i = 0; i < self._wsRequestQueue.length; i++) {
-            socket.send(self._wsRequestQueue[i]);
+            request = self._wsRequestQueue[i];
+
+            // Do we use timeouts, and if so, is it a call?
+            if (timeout && self._wsCallbacks[request.id]) {
+              self._wsCallbacks[request.id].timeout = self._createTimeout(request.id);
+            }
+            socket.send(request);
           }
           self._wsRequestQueue = [];
         };
       }
     } else {
+
+      // Do we use timeouts, and if so, is it a call?
+      if (this.options.timeout && this._wsCallbacks[request.id]) {
+        this._wsCallbacks[request.id].timeout = this._createTimeout(request.id);
+      }
+
       // We have a socket and it should be ready to send on.
       socket.send(requestJson);
-    }
-
-    // Setup callbacks.  If there is an id, this is a call and not a notify.
-    if ('id' in request && typeof successCb !== 'undefined') {
-      this._wsCallbacks[request.id] = {successCb: successCb, errorCb: errorCb};
     }
   };
 
@@ -319,6 +344,11 @@
         // Get the success callback.
         var successCb = this._wsCallbacks[response.id].successCb;
 
+        // Clear any timeout
+        if (this._wsCallbacks[response.id].timeout) {
+          clearTimeout(this._wsCallbacks[response.id].timeout);
+        }
+
         // Delete the callback from the storage.
         delete this._wsCallbacks[response.id];
 
@@ -343,6 +373,58 @@
 
     // If we get here it's an invalid JSON-RPC response, pass to fallback message handler.
     this.options.onmessage(event);
+  };
+
+  /**
+   * Internal WebSocket error handler.
+   * Will execute all unresolved calls immideatly.
+   **/
+  JsonRpcClient.prototype._wsOnError = function(event) {
+    this._failAllCalls('Socket errored.');
+    this.options.onerror(event);
+  };
+
+  /**
+   * Internal WebSocket close handler.
+   * Will execute all unresolved calls immideatly.
+   **/
+  JsonRpcClient.prototype._wsOnClose = function(event) {
+    this._failAllCalls('Socket closed.');
+    this.options.onclose(event);
+  };
+
+  /**
+   * Execute error handler on all pending calls.
+   */
+  JsonRpcClient.prototype._failAllCalls = function(error) {
+    for (var key in this._wsCallbacks) {
+      if (this._wsCallbacks.hasOwnProperty(key)) {
+        // Get the error callback.
+        var errorCb = this._wsCallbacks[key].errorCb;
+
+        // Run callback with the error object as parameter.
+        errorCb(error);
+      }
+    }
+
+    // Throw 'em away
+    this._wsCallbacks = {};
+  };
+
+  /**
+   * Create a timeout for this request
+   */
+  JsonRpcClient.prototype._createTimeout = function(id) {
+    if (this.options.timeout) {
+      var that = this;
+      return setTimeout(function() {
+        if (that._wsCallbacks[id]) {
+          var errorCb = that._wsCallbacks[id].errorCb;
+          delete that._wsCallbacks[id];
+          errorCb('Call timed out.');
+        }
+      }, this.options.timeout);
+    }
   };
 
   /************************************************************************************************
