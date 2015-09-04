@@ -42,6 +42,13 @@
   var JsonRpcClient = function(options) {
     var self = this;
     var noop = function() {};
+    this.CODES = {
+        CODE_HTTP_OK : 200,
+        CODE_JSON_RPC_TRANSPORT_ERROR : -32300,
+        CODE_JSON_RPC_APPLICATION_ERROR : -32500,
+        CODE_JSON_RPC_SYSTEM_ERROR : -32400,
+        CODE_JSON_RPC_UNKNOWN_ERROR : -32000
+    };
     this.options = $.extend({
       ajaxUrl     : null,
       headers     : {},   ///< Optional additional headers to send in $.ajax request.
@@ -128,26 +135,88 @@
       xhrFields  : this.options.xhrFields,
       timeout    : this.options.timeout,
 
-      success    : function(data) {
-        if ('error' in data) {
-          errorCb(data.error);
-        } else {
-          successCb(data.result);
+      success    : function(data, textStatus, jqXHR) {
+        var error;
+        try {
+            // Invalid JSON object response  - applicaton or server implementation error?
+            if (!(data && data.constructor === Object)) {
+                error = {
+                    code: self.CODES.CODE_JSON_RPC_APPLICATION_ERROR,
+                    message: 'Application/Server error: response not a JSON object.',
+                    data: {
+                        status: jqXHR.status,                   // the http request status. Should be 200 in this case.
+                        statusText: jqXHR.statusText,           // the http request status text. Should be "OK" in this case.
+                        responseText: jqXHR.responseText        // the received text response.
+                    }
+                };
+                throw(error);
+            }
+            // Invalid JSON-RPC response - applicaton or server implementation error?
+            if (!('id' in data && 'jsonrpc' in data && data.jsonrpc === '2.0' && ('error' in data || 'result' in data) )) {
+                error = {
+                    code: self.CODES.CODE_JSON_RPC_APPLICATION_ERROR,
+                    message: 'Application error: Invalid JSON-RPC response.',
+                    data: {
+                        status: jqXHR.status,                   // the http request status. Should be 200 in this case.
+                        statusText: jqXHR.statusText,           // the http request status text. Should be "OK" in this case.
+                        responseText: jqXHR.responseText        // the received text response.
+                    }
+                };
+                throw(error);
+            }
+            // Unsuccessful JSON-RPC response.
+            if ('error' in data) {
+                error = {
+                    code: data.error.code || self.CODES.CODE_JSON_RPC_UNKNOWN_ERROR,
+                    message: data.error.message || 'Unknown error.',
+                    data: {
+                        status: jqXHR.status,                       // the http request status. Should be 200 in this case.
+                        statusText: jqXHR.statusText,               // the http request status text. Should be "OK" in this case.
+                        responseText: JSON.stringify(data.error)    // the string representation of the error
+                    }
+                };
+                throw(error);
+            }
+            successCb(data.result);
+        } catch (e) {
+            if ('console' in window) { console.warn(error); }
+            errorCb(e);
         }
       },
 
       // JSON-RPC Server could return non-200 on error
       error    : function(jqXHR, textStatus, errorThrown) {
-        try {
-          var response = self.JSON.parse(jqXHR.responseText);
-          if ('console' in window) { console.log(response); }
+        var err;
+        if (jqXHR.status === self.CODES.CODE_HTTP_OK) {
+            // The request has succeeded but there was an error when $.ajax parsed the response.
+            // Most probably this will happen for an invalid JSON in responseText
+            err = {
+                code: self.CODES.CODE_JSON_RPC_SYSTEM_ERROR,
+                message: 'Invalid response format',
+                data: {
+                    status: jqXHR.status,                   // the http request status. Should be 200 in this case.
+                    statusText: jqXHR.statusText,           // the http request status text. Should be "OK" in this case.
+                    errorThrown: errorThrown.message || errorThrown,               // the error thrown by $.ajax. Should be "parsererror" for invalid JSON.
+                    responseText: jqXHR.responseText        // the received text response.
+                }
+            };
+            console.error(errorThrown.message);
+        } else {
+            // Non-200 http status code.
+            err = {
+                code: self.CODES.CODE_JSON_RPC_TRANSPORT_ERROR,
+                message: 'Transport error',
+                data: {
+                    status: jqXHR.status,                   // the http request status.
+                    statusText: jqXHR.statusText,           // the http request status text.
+                    errorThrown: errorThrown,               // the error thrown by $.ajax. Should be the same with statusText in this case.
+                    responseText: jqXHR.responseText        // should be the same with statusText in this case.
+                }
+            };
 
-          errorCb(response.error);
         }
-        catch (err) {
-          // Perhaps the responseText wasn't really a jsonrpc-error.
-          errorCb({error: jqXHR.responseText});
-        }
+        if ('console' in window) { console.warn(err); }
+        errorCb(err);
       }
     });
 
@@ -554,7 +623,7 @@
         }
       }
 
-      var successCb = function(data) { self._batchCb(data, handlers, self.allDoneCb); };
+      var successCb = function(data) { self._batchCb(data, handlers, self.allDoneCb, self.errorCb); };
 
       // No WebSocket, and no HTTP backend?  This won't work.
       if (self.jsonrpcclient.options.ajaxUrl === null) {
@@ -574,7 +643,36 @@
 
         // Batch-requests should always return 200
         error    : function(jqXHR, textStatus, errorThrown) {
-          self.errorCb(jqXHR, textStatus, errorThrown);
+            //   self.errorCb(jqXHR, textStatus, errorThrown);
+            var err;
+            if (jqXHR.status === self.CODES.CODE_HTTP_OK) {
+                // The request has succeeded but there was an error when $.ajax parsed the response.
+                // Most probably this will happen for an invalid JSON in responseText
+                err = {
+                    code: self.CODES.CODE_JSON_RPC_SYSTEM_ERROR,
+                    message: 'Invalid response format',
+                    data: {
+                        status: jqXHR.status,                   // the http request status. Should be 200 in this case.
+                        statusText: jqXHR.statusText,           // the http request status text. Should be "OK" in this case.
+                        errorThrown: errorThrown.message || errorThrown,               // the error thrown by $.ajax. Should be "parsererror" for invalid JSON.
+                        responseText: jqXHR.responseText        // the received text response.
+                    }
+                };
+            } else {
+                // Non-200 http status code.
+                err = {
+                    code: self.CODES.CODE_JSON_RPC_TRANSPORT_ERROR,
+                    message: 'Transport error',
+                    data: {
+                        status: jqXHR.status,                   // the http request status.
+                        statusText: jqXHR.statusText,           // the http request status text.
+                        errorThrown: errorThrown,               // the error thrown by $.ajax. Should be the same with statusText in this case.
+                        responseText: jqXHR.responseText        // should be the same with statusText in this case.
+                    }
+                };
+            }
+            if ('console' in window) { console.warn(err); }
+            self.errorCb(err);
         },
         success  : successCb
       });
@@ -591,7 +689,12 @@
    * @fn _batchCb
    * @memberof JsonRpcClient
    */
-  JsonRpcClient._batchObject.prototype._batchCb = function(result, handlers, allDoneCb) {
+  JsonRpcClient._batchObject.prototype._batchCb = function(result, handlers, allDoneCb, errorCb) {
+    var self = this;
+    // The result must be an Array.
+    if (!(result && result.constructor === Array)) {
+
+    }
     for (var i = 0; i < result.length; i++) {
       var response = result[i];
 
@@ -614,6 +717,17 @@
     }
 
     if (typeof allDoneCb === 'function') { allDoneCb(result); }
+  };
+  /**
+   * Parse respone from the server
+   * @param  {[type]} result The
+   * @return {$.deffered}        [description]
+   */
+  JsonRpcClient.prototype._parseResponse = function(result) {
+      console.log(result);
+      var dfd = new $.Deferred();
+
+      return dfd.promise();
   };
 
   $.JsonRpcClient = JsonRpcClient;
