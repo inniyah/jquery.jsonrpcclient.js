@@ -127,7 +127,7 @@
     var deferred = $.ajax({
       type       : 'POST',
       url        : this.options.ajaxUrl,
-      contentType: 'application/json',
+      contentType: 'application/json-rpc',
       data       : this.JSON.stringify(request),
       dataType   : 'json',
       cache      : false,
@@ -165,7 +165,7 @@
                 throw(error);
             }
             // Unsuccessful JSON-RPC response.
-            if ('error' in data) {
+            if ('error' in data && data.error != null) {
                 error = {
                     code: data.error.code || self.CODES.CODE_JSON_RPC_UNKNOWN_ERROR,
                     message: data.error.message || 'Unknown error.',
@@ -260,7 +260,7 @@
     var deferred = $.ajax({
       type       : 'POST',
       url        : this.options.ajaxUrl,
-      contentType: 'application/json',
+      contentType: 'application/json-rpc',
       data       : this.JSON.stringify(request),
       dataType   : 'json',
       cache      : false,
@@ -633,7 +633,7 @@
       // Send request
       deferred = $.ajax({
         url        : self.jsonrpcclient.options.ajaxUrl,
-        contentType: 'application/json',
+        contentType: 'application/json-rpc',
         data       : this.jsonrpcclient.JSON.stringify(batchRequest),
         dataType   : 'json',
         cache      : false,
