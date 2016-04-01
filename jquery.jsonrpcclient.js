@@ -52,6 +52,7 @@
     this.options = $.extend({
       ajaxUrl     : null,
       headers     : {},   ///< Optional additional headers to send in $.ajax request.
+      timeout     : 0,
       socketUrl   : null, ///< WebSocket URL. (Not used if a custom getSocket is supplied.)
       onmessage   : noop, ///< Optional onmessage-handler for WebSocket.
       onopen      : noop, ///< Optional onopen-handler for WebSocket.
@@ -132,6 +133,7 @@
       dataType   : 'json',
       cache      : false,
       headers    : this.options.headers,
+      timeout    : this.options.timeout,
       xhrFields  : this.options.xhrFields,
       timeout    : this.options.timeout,
 
@@ -265,6 +267,7 @@
       dataType   : 'json',
       cache      : false,
       headers    : this.options.headers,
+      timeout    : this.options.timeout,
       xhrFields  : this.options.xhrFields
     });
 
@@ -639,6 +642,7 @@
         cache      : false,
         type       : 'POST',
         headers    : self.jsonrpcclient.options.headers,
+        timeout    : self.jsonrpcclient.options.timeout ? self.jsonrpcclient.options.timeout : 0,
         xhrFields  : self.jsonrpcclient.options.xhrFields,
 
         // Batch-requests should always return 200
